@@ -1,5 +1,6 @@
 #include <avr/io.h>
 #define F_CPU 16000000UL
+#define F_SCK	40000UL		// SCK 클록 값 = 40 Khz
 #include <util/delay.h>
 #include <avr/interrupt.h>
 #include <stdio.h>
@@ -20,8 +21,9 @@
 #define FND_SEL3 0x04
 #define FND_SEL4 0x08
 
-#define I2C_SCL PD0
-#define I2C_SDA PD1
+#define ATS75_ADDR	0x98	// 0b10011000, 7비트를 1비트 left shift
+#define ATS75_CONFIG_REG		1
+#define ATS75_TEMP_REG		0
 
 unsigned int fnd[10]= {FND_NUM0,FND_NUM1,FND_NUM2,FND_NUM3,FND_NUM4,FND_NUM5,FND_NUM6,FND_NUM7,FND_NUM8,FND_NUM9};
 unsigned int fnd_sel[4] = {FND_SEL1,FND_SEL2,FND_SEL3,FND_SEL4};
@@ -58,6 +60,9 @@ void I2C_transmit(uint8_t data);
 uint8_t I2C_receive_ACK();
 uint8_t I2C_receive_NACK();
 void I2C_stop();
+void init_twi_port();
+void write_twi_1byte_nopreset(char reg, char data);
+int read_twi_2byte_nopreset(char reg);
 
 void test_led();
 void test_buzzer();
@@ -271,9 +276,58 @@ void test_extSwitch()
 
 void init_i2c()
 {
+/*
 	DDRD |= (1<< I2C_SCL);
 	DDRD |= (1<< I2C_SDA);
 	TWBR = 32; // clock 주파수 설정 200khz
+*/
+	DDRC = 0xff; DDRG = 0xff;	// FND 출력 세팅
+	DDRD = 0x00;; PORTD = 3;	// For Internal pull-up for SCL & SCK
+	SFIOR &= ~(1<<PUD); 	// PUD = 0 : Pull Up Enable
+	TWBR = (F_CPU/F_SCK - 16) / 2;	// 공식 참조, bit trans rate 설정
+	TWSR = TWSR & 0xfc;		// Prescaler 값 = 00 (1배)
+}
+void write_twi_1byte_nopreset(char reg, char data)
+{
+	TWCR = (1 << TWINT) | (1<<TWSTA) | (1<<TWEN);// START 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x08) ;		// START 상태 검사, 이후 모두 상태 검사
+	TWDR = ATS75_ADDR | 0;			// SLA+W 준비, W=0
+	TWCR = (1 << TWINT) | (1 << TWEN);		// SLA+W 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x18) ;
+	TWDR = reg;				// aTS75 Reg 값 준비
+	TWCR = (1 << TWINT) | (1 << TWEN);		// aTS75 Reg 값 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x28) ;
+	TWDR = data;				// DATA 준비
+	TWCR = (1 << TWINT) | (1 << TWEN);		// DATA 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x28) ;
+	TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);	// STOP 전송
+	while ((TWCR & (1 << TWSTO))) ;		// STOP 확인
+}
+int read_twi_2byte_nopreset(char reg)
+{
+	char high_byte, low_byte;
+	TWCR = (1 << TWINT) | (1<<TWSTA) | (1<<TWEN);// START 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x08) ;		// START 상태 검사, 이후 ACK 및 상태 검사
+	TWDR = ATS75_ADDR | 0;			// SLA+W 준비, W=0
+	TWCR = (1 << TWINT) | (1 << TWEN);		// SLA+W 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x18) ;
+	TWDR = reg;				// aTS75 Reg 값 준비
+	TWCR = (1 << TWINT) | (1 << TWEN);		// aTS75 Reg 값 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x28) ;
+	TWCR = (1 << TWINT) | (1<<TWSTA) | (1<<TWEN);// RESTART 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x10) ;		// RESTART 상태 검사, 이후 ACK, NO_ACK 상태 검사
+	TWDR = ATS75_ADDR | 1;			// SLA+R 준비, R=1
+	TWCR = (1 << TWINT) | (1 << TWEN);		// SLA+R 전송
+	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x40) ;
+	TWCR = (1 << TWINT) | (1 << TWEN | 1 << TWEA);// 1st DATA 준비
+	while(((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x50);
+	high_byte = TWDR;				// 1st DATA 수신
+	TWCR = (1 << TWINT) | (1 << TWEN);// 2nd DATA 준비
+	while(((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x58);
+	low_byte = TWDR;				// 2nd DATA 수신
+	TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);	// STOP 전송
+	while ((TWCR & (1 << TWSTO))) ;		 // STOP 확인
+	return((high_byte<<8) | low_byte);		// 수신 DATA 리턴
 }
 void I2C_start()
 {
@@ -310,48 +364,6 @@ uint8_t decimal_to_bcd(uint8_t decimal)
 {
 	return (((decimal/10)<<4)|(decimal%10));
 }
-void write_twi_1byte_nopreset(char data)
-{
-	TWCR = (1 << TWINT) | (1<<TWSTA) | (1<<TWEN);// START 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x08) ;		// START 상태 검사, 이후 모두 상태 검사
-	TWDR = 0x98 | 0;			// SLA+W 준비, W=0
-	TWCR = (1 << TWINT) | (1 << TWEN);		// SLA+W 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x18) ;
-	TWDR = 1;				// aTS75 Reg 값 준비
-	TWCR = (1 << TWINT) | (1 << TWEN);		// aTS75 Reg 값 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x28) ;
-	TWDR = data;				// DATA 준비
-	TWCR = (1 << TWINT) | (1 << TWEN);		// DATA 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x28) ;
-	TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);	// STOP 전송
-	while ((TWCR & (1 << TWSTO))) ;		// STOP 확인
-}
-int read_twi_2byte_nopreset()
-{
-	char high_byte, low_byte;
-	TWCR = (1 << TWINT) | (1<<TWSTA) | (1<<TWEN);// START 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x08) ;		// START 상태 검사, 이후 ACK 및 상태 검사
-	TWDR = 0x98 | 0;			// SLA+W 준비, W=0
-	TWCR = (1 << TWINT) | (1 << TWEN);		// SLA+W 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x18) ;
-	TWDR = 1;				// aTS75 Reg 값 준비
-	TWCR = (1 << TWINT) | (1 << TWEN);		// aTS75 Reg 값 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x28) ;
-	TWCR = (1 << TWINT) | (1<<TWSTA) | (1<<TWEN);// RESTART 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x10) ;		// RESTART 상태 검사, 이후 ACK, NO_ACK 상태 검사
-	TWDR = 0x98 | 1;			// SLA+R 준비, R=1
-	TWCR = (1 << TWINT) | (1 << TWEN);		// SLA+R 전송
-	while (((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x40) ;
-	TWCR = (1 << TWINT) | (1 << TWEN | 1 << TWEA);// 1st DATA 준비
-	while(((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x50);
-	high_byte = TWDR;				// 1st DATA 수신
-	TWCR = (1 << TWINT) | (1 << TWEN);// 2nd DATA 준비
-	while(((TWCR & (1 << TWINT)) == 0x00) || (TWSR & 0xf8) != 0x58);
-	low_byte = TWDR;				// 2nd DATA 수신
-	TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);	// STOP 전송
-	while ((TWCR & (1 << TWSTO))) ;		 // STOP 확인
-	return((high_byte<<8) | low_byte);		// 수신 DATA 리턴
-}
 
 int main(void)
 {
@@ -364,13 +376,13 @@ int main(void)
 	init_adc();
 	init_extSwitch();
 	init_i2c();
-	
 	//uint8_t address = 
+	
+	
 	sei();
 	
-	uint8_t address = 0x98;
 	int temp =0;
-
+	write_twi_1byte_nopreset(ATS75_CONFIG_REG, 0x00);
 	
 	while (1)
 	{
@@ -382,7 +394,10 @@ int main(void)
 		//test_serial();
 		//test_adc();
 		//test_extSwitch();
-		
+		temp = read_twi_2byte_nopreset(ATS75_CONFIG_REG);
+		sprintf(textBuff,"temp : %d",temp);
+		SendLine(textBuff);
+		_delay_ms(1000);
 		/*
 		temp = read_twi_2byte_nopreset(0);
 		sprintf(textBuff,"temp : %d",temp);
